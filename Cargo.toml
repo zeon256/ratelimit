@@ -13,7 +13,7 @@ categories = ["concurrency", "algorithms"]
 rust-version = "1.85"
 
 [features]
-default = []
+default = ["std"]
 std = []
 
 [dependencies]

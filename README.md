@@ -8,6 +8,12 @@ A lock-free token bucket ratelimiter for rate limiting and admission control.
 cargo add ratelimit
 ```
 
+`std` is enabled by default. For `no_std` targets, disable default features:
+
+```toml
+ratelimit = { version = "1", default-features = false }
+```
+
 ## Usage
 
 ```rust
