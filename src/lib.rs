@@ -754,4 +754,40 @@ mod tests {
         let rl = Ratelimiter::with_clock(1000, clock);
         assert_eq!(rl.rate(), 1000);
     }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn multithread() {
+        use std::sync::Arc;
+        use std::vec::Vec;
+
+        let rl = Arc::new(
+            Ratelimiter::builder(10_000)
+                .max_tokens(10_000)
+                .build()
+                .unwrap(),
+        );
+        let duration = Duration::from_millis(200);
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let rl = rl.clone();
+                std::thread::spawn(move || {
+                    let start = std::time::Instant::now();
+                    let mut count = 0u64;
+                    while start.elapsed() < duration {
+                        if rl.try_wait().is_ok() {
+                            count += 1;
+                        }
+                    }
+                    count
+                })
+            })
+            .collect();
+
+        let total: u64 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+
+        assert!(total >= 1000, "expected >= 1000, got {total}");
+        assert!(total <= 4000, "expected <= 4000, got {total}");
+    }
 }
