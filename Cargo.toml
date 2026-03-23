@@ -18,6 +18,3 @@ std = []
 
 [dependencies]
 thiserror = { version = "2.0", default-features = false }
-
-[dev-dependencies]
-libc = { version = "0.2", default-features = false }

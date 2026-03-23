@@ -375,6 +375,7 @@ pub struct Builder<C> {
 }
 
 impl<C> Builder<C> {
+    #[cfg_attr(not(any(feature = "std", test)), allow(dead_code))]
     pub(crate) fn with_clock(rate: u64, clock: C) -> Self {
         Self {
             rate,
@@ -435,41 +436,31 @@ impl<C> Builder<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::AtomicU64;
     use core::time::Duration;
+    use std::sync::Arc;
 
-    /// Test clock using libc::clock_gettime for no_std-compatible testing.
-    struct TestClock(u64);
+    #[derive(Clone, Debug)]
+    struct TestClock {
+        elapsed_ns: Arc<AtomicU64>,
+    }
 
     impl TestClock {
         fn new() -> Self {
-            Self(now_ns())
+            Self {
+                elapsed_ns: Arc::new(AtomicU64::new(0)),
+            }
+        }
+
+        fn advance(&self, duration: Duration) {
+            let elapsed_ns = duration.as_nanos().min(u64::MAX as u128) as u64;
+            self.elapsed_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
         }
     }
 
     impl Clock for TestClock {
         fn elapsed(&self) -> Duration {
-            Duration::from_nanos(now_ns().saturating_sub(self.0))
-        }
-    }
-
-    fn now_ns() -> u64 {
-        let mut ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        unsafe {
-            libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
-        }
-        ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
-    }
-
-    fn sleep(d: Duration) {
-        let ts = libc::timespec {
-            tv_sec: d.as_secs() as libc::time_t,
-            tv_nsec: d.subsec_nanos() as libc::c_long,
-        };
-        unsafe {
-            libc::nanosleep(&ts, core::ptr::null_mut());
+            Duration::from_nanos(self.elapsed_ns.load(Ordering::Relaxed))
         }
     }
 
@@ -499,10 +490,11 @@ mod tests {
 
     #[test]
     fn refill_over_time() {
-        let rl = Ratelimiter::with_clock(1000, TestClock::new());
+        let clock = TestClock::new();
+        let rl = Ratelimiter::with_clock(1000, clock.clone());
 
-        // Wait 100ms — should accumulate ~100 tokens
-        sleep(Duration::from_millis(100));
+        // Advance 100ms — should accumulate ~100 tokens
+        clock.advance(Duration::from_millis(100));
 
         let mut count = 0;
         while rl.try_wait().is_ok() {
@@ -533,13 +525,13 @@ mod tests {
     #[test]
     fn idle_does_not_exceed_capacity() {
         let clock = TestClock::new();
-        let rl = Builder::with_clock(1000, clock)
+        let rl = Builder::with_clock(1000, clock.clone())
             .max_tokens(10)
             .build()
             .unwrap();
 
-        // Sleep long enough to accumulate way more than max_tokens
-        sleep(Duration::from_millis(100));
+        // Advance long enough to accumulate way more than max_tokens
+        clock.advance(Duration::from_millis(100));
 
         let mut count = 0;
         while rl.try_wait().is_ok() {
@@ -551,16 +543,17 @@ mod tests {
 
     #[test]
     fn set_rate() {
-        let rl = Ratelimiter::with_clock(100, TestClock::new());
+        let clock = TestClock::new();
+        let rl = Ratelimiter::with_clock(100, clock.clone());
 
-        // Wait for some tokens
-        sleep(Duration::from_millis(50));
+        // Accumulate some tokens
+        clock.advance(Duration::from_millis(50));
 
         // Increase rate 10x
         rl.set_rate(1000);
 
-        // Wait again — should accumulate faster
-        sleep(Duration::from_millis(50));
+        // Advance again — should accumulate faster
+        clock.advance(Duration::from_millis(50));
 
         let mut count = 0;
         while rl.try_wait().is_ok() {
@@ -608,13 +601,13 @@ mod tests {
     #[test]
     fn dropped_tokens() {
         let clock = TestClock::new();
-        let rl = Builder::with_clock(1000, clock)
+        let rl = Builder::with_clock(1000, clock.clone())
             .max_tokens(10)
             .build()
             .unwrap();
 
-        // Sleep long enough for many tokens to try to accumulate
-        sleep(Duration::from_millis(100));
+        // Advance long enough for many tokens to try to accumulate
+        clock.advance(Duration::from_millis(100));
 
         // Trigger a refill
         let _ = rl.try_wait();
@@ -625,15 +618,14 @@ mod tests {
 
     #[test]
     fn wait_loop() {
-        let rl = Ratelimiter::with_clock(10_000, TestClock::new());
-
         let clock = TestClock::new();
+        let rl = Ratelimiter::with_clock(10_000, clock.clone());
         let mut count = 0;
 
         while clock.elapsed() < Duration::from_millis(100) {
             match rl.try_wait() {
                 Ok(()) => count += 1,
-                Err(wait) => sleep(wait),
+                Err(wait) => clock.advance(wait),
             }
         }
 
@@ -645,8 +637,9 @@ mod tests {
     #[test]
     fn high_rate() {
         // Verify no overflow/truncation at very high rates
-        let rl = Ratelimiter::with_clock(1_000_000_000_000, TestClock::new()); // 1 trillion/s
-        sleep(Duration::from_millis(10));
+        let clock = TestClock::new();
+        let rl = Ratelimiter::with_clock(1_000_000_000_000, clock.clone()); // 1 trillion/s
+        clock.advance(Duration::from_millis(10));
         assert!(rl.try_wait().is_ok());
     }
 
@@ -660,17 +653,19 @@ mod tests {
 
     #[test]
     fn unlimited_then_set_rate() {
-        let rl = Ratelimiter::with_clock(0, TestClock::new());
+        let clock = TestClock::new();
+        let rl = Ratelimiter::with_clock(0, clock.clone());
         assert!(rl.try_wait().is_ok()); // unlimited
 
         rl.set_rate(1000);
-        sleep(Duration::from_millis(50));
+        clock.advance(Duration::from_millis(50));
         assert!(rl.try_wait().is_ok()); // set_rate alone resets max_tokens
     }
 
     #[test]
     fn set_rate_to_zero_and_back() {
-        let rl = Ratelimiter::with_clock(1000, TestClock::new());
+        let clock = TestClock::new();
+        let rl = Ratelimiter::with_clock(1000, clock.clone());
 
         // Switch to unlimited
         rl.set_rate(0);
@@ -684,7 +679,7 @@ mod tests {
         assert_eq!(rl.max_tokens(), 500);
 
         // Should work after some time
-        sleep(Duration::from_millis(50));
+        clock.advance(Duration::from_millis(50));
         assert!(rl.try_wait().is_ok());
     }
 
@@ -697,14 +692,15 @@ mod tests {
 
     #[test]
     fn max_tokens_zero() {
-        let rl = Ratelimiter::with_clock(1000, TestClock::new());
+        let clock = TestClock::new();
+        let rl = Ratelimiter::with_clock(1000, clock.clone());
         rl.set_max_tokens(0);
-        sleep(Duration::from_millis(10));
+        clock.advance(Duration::from_millis(10));
         // With max_tokens=0, no tokens can accumulate
         assert!(rl.try_wait().is_err());
         // Restore capacity
         rl.set_max_tokens(1000);
-        sleep(Duration::from_millis(10));
+        clock.advance(Duration::from_millis(10));
         assert!(rl.try_wait().is_ok());
     }
 
